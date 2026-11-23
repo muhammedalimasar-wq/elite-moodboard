@@ -110,7 +110,7 @@ async function imgPart(b) {
   const [h, d] = data.split(","); return { inlineData: { data: d, mimeType: h.slice(5).split(";")[0] } };
 }
 async function buildParts(prompt, o) { const parts = [prompt]; for (const b of (o && o.images) || []) parts.push(await imgPart(b)); return parts; }
-const sample = async (prompt, o) => { const text = await gen(await buildParts(prompt, o)); if (o && o.onText) o.onText({ text }); return { text }; };
+const sample = async (prompt, o) => { const text = (await gen(await buildParts(prompt, o))).replace(/\*\*|__|^#+\s*/gm, "").trim(); if (o && o.onText) o.onText({ text }); return { text }; };
 sample.json = async (prompt, o) => {
   const t = await gen(await buildParts(prompt + "\nReturn only valid JSON, no markdown.", o));
   const m = t.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null;
