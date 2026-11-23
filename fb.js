@@ -77,23 +77,27 @@ const assets = {
 
 
 // ---- AI (Gemini via Firebase AI Logic) — owner only ----
-const MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"];
-let aiMod = null, modelIdx = 0;
+const MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"];
+let aiMod = null; const dead = new Set();
 async function gen(parts) {
   if (!aiMod) aiMod = await import("https://www.gstatic.com/firebasejs/12.10.0/firebase-ai.js");
   const ai = aiMod.getAI(app, { backend: new aiMod.GoogleAIBackend() });
-  let last;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const model = aiMod.getGenerativeModel(ai, { model: MODELS[modelIdx] });
-    try { const r = await model.generateContent(parts); return r.response.text(); }
-    catch (e) {
-      last = e; const m = String(e && (e.message || e));
-      if (/429|quota|rate|RESOURCE_EXHAUSTED/i.test(m)) { await new Promise(r => setTimeout(r, 15000)); continue; }
-      if (/404|not found|not supported|NOT_FOUND/i.test(m) && modelIdx < MODELS.length - 1) { modelIdx++; continue; }
-      throw e;
+  let last, limited = false;
+  for (let round = 0; round < 3; round++) {
+    for (const name of MODELS) {
+      if (dead.has(name)) continue;
+      try { const r = await aiMod.getGenerativeModel(ai, { model: name }).generateContent(parts); return r.response.text(); }
+      catch (e) {
+        last = e; const m = String(e && (e.message || e));
+        if (/\[404|no longer available|not found/i.test(m)) { dead.add(name); continue; }
+        if (/\[429|RESOURCE_EXHAUSTED|quota/i.test(m)) { limited = true; continue; }
+        if (/\[50[03]|high demand|unavailable/i.test(m)) continue;
+        throw e;
+      }
     }
+    await new Promise(r => setTimeout(r, limited ? 20000 : 4000));
   }
-  const err = new Error("rate limited"); err.code = "rate_limited"; err.cause = last; throw err;
+  const err = new Error("AI unavailable"); err.code = limited ? "rate_limited" : "unavailable"; err.cause = last; throw err;
 }
 async function imgPart(b) {
   let data;
