@@ -1,8 +1,9 @@
 // Firebase backend for the Elite mood board website.
 // Exposes the same small interface the app already used (db, user, assets, downloads).
-import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-firestore.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app-check.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC7HE7OukuvjtxoXrcZBiW2mELls9qVLLw",
@@ -14,7 +15,9 @@ const firebaseConfig = {
 };
 const ADMIN = "muhammed.ali.masar@gmail.com";
 
+const RECAPTCHA_KEY = "6Lf3zS4uAAAAAACVJhJHtrV9DSHt2eseiFgIJi6-";   // reCAPTCHA (Fraud Defense) site key for App Check — public
 const app = initializeApp(firebaseConfig);
+if (RECAPTCHA_KEY) initializeAppCheck(app, { provider: new ReCaptchaEnterpriseProvider(RECAPTCHA_KEY), isTokenAutoRefreshEnabled: true });
 const fs = getFirestore(app);
 const auth = getAuth(app);
 const authReady = new Promise(r => { const u = onAuthStateChanged(auth, x => { u(); r(x); }); });
@@ -72,6 +75,44 @@ const assets = {
   delete: id => deleteDoc(doc(fs, pathOf(id))),
 };
 
+
+// ---- AI (Gemini via Firebase AI Logic) — owner only ----
+const MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"];
+let aiMod = null, modelIdx = 0;
+async function gen(parts) {
+  if (!aiMod) aiMod = await import("https://www.gstatic.com/firebasejs/12.10.0/firebase-ai.js");
+  const ai = aiMod.getAI(app, { backend: new aiMod.GoogleAIBackend() });
+  let last;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const model = aiMod.getGenerativeModel(ai, { model: MODELS[modelIdx] });
+    try { const r = await model.generateContent(parts); return r.response.text(); }
+    catch (e) {
+      last = e; const m = String(e && (e.message || e));
+      if (/429|quota|rate|RESOURCE_EXHAUSTED/i.test(m)) { await new Promise(r => setTimeout(r, 15000)); continue; }
+      if (/404|not found|not supported|NOT_FOUND/i.test(m) && modelIdx < MODELS.length - 1) { modelIdx++; continue; }
+      throw e;
+    }
+  }
+  const err = new Error("rate limited"); err.code = "rate_limited"; err.cause = last; throw err;
+}
+async function imgPart(b) {
+  let data;
+  try {
+    const bmp = await createImageBitmap(b); const s = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(bmp, 0, 0, c.width, c.height);
+    data = c.toDataURL("image/jpeg", 0.85);
+  } catch (e) { data = await blobToDataURL(b); }
+  const [h, d] = data.split(","); return { inlineData: { data: d, mimeType: h.slice(5).split(";")[0] } };
+}
+async function buildParts(prompt, o) { const parts = [prompt]; for (const b of (o && o.images) || []) parts.push(await imgPart(b)); return parts; }
+const sample = async (prompt, o) => { const text = await gen(await buildParts(prompt, o)); if (o && o.onText) o.onText({ text }); return { text }; };
+sample.json = async (prompt, o) => {
+  const t = await gen(await buildParts(prompt + "\nReturn only valid JSON, no markdown.", o));
+  const m = t.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null;
+};
+sample.limits = async () => ({ images: true });
+
 // ---- user ----
 const user = {
   id: async () => { const id = rid(); upCtx = id; return id; },
@@ -87,7 +128,7 @@ const downloads = {
   },
 };
 
-const caps = { db, user, assets, downloads, sample: null };
+const caps = { db, user, assets, downloads };
 window.__fb = {
   blobURL,
   setUpCtx: c => { upCtx = c || "x"; },
@@ -95,4 +136,7 @@ window.__fb = {
   logout: () => signOut(auth),
   email: async () => { const u = await authReady; return u ? u.email : ""; },
 };
-window.__fbResolve({ use: async n => { if (!(n in caps) || !caps[n]) throw new Error("na"); return caps[n]; } });
+window.__fbResolve({ use: async n => {
+  if (n === "sample") { if (await user.isOwner()) return sample; throw new Error("owner only"); }
+  if (!(n in caps) || !caps[n]) throw new Error("na"); return caps[n];
+} });
